@@ -1,0 +1,15 @@
+# Local Python / editor files
+__pycache__/
+*.py[cod]
+.venv/
+.DS_Store
+Thumbs.db
+
+# Task text, review records and browser state stay local
+/work/
+/outputs/
+.playwright-cli/
+.env
+.env.*
+job.json
+authored-report.json

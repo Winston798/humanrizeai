@@ -1,0 +1,4 @@
+interface:
+  display_name: "humanrizeai"
+  short_description: "通过 HumanizeAI 分批处理长文，全文审查逻辑事实与上下文后最小修正并交付"
+  default_prompt: "使用 $humanrizeai 将以下文本通过 humanizeai.pro 分批处理，结合原文与全文审查逻辑、事实和上下文，作必要的最小修正并复读后交付最终版。"
