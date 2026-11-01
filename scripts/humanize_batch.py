@@ -2,6 +2,7 @@
 """HumanizeAI batching with mandatory contextual review and minimal repairs."""
 import argparse
 import base64
+import difflib
 import hashlib
 import json
 import os
@@ -79,9 +80,11 @@ def load(job_dir):
     return path, job
 
 
+REVIEW_VERSION = 2
 REVIEW_CHECKS = ('full_source', 'full_website_output', 'logic_and_causality',
                  'facts_and_meaning', 'global_context_and_boundaries',
-                 'omissions_and_references')
+                 'omissions_and_references', 'necessary_edits_only',
+                 'original_structure_preserved_or_justified', 'source_issues_separated')
 CATEGORIES = {'logic', 'fact', 'context', 'omission', 'reference', 'terminology'}
 
 
@@ -109,10 +112,11 @@ def prepare_review(path, job):
     folder = path.parent / 'review'
     folder.mkdir(exist_ok=True)
     source, raw = merged(job, 'input'), merged(job, 'output')
-    template = {'version': 1, 'source_sha256': digest(source),
+    template = {'version': REVIEW_VERSION, 'source_sha256': digest(source),
                 'website_sha256': digest(raw),
                 'checks': {name: False for name in REVIEW_CHECKS},
-                'summary': '', 'edits': [], 'unresolved': []}
+                'summary': '', 'edits': [], 'unresolved': [],
+                'source_notes': [], 'observations': []}
     # The stable source/raw snapshots are regenerated; authored reports are retained.
     write_text_exact(folder / 'source.txt', source)
     write_text_exact(folder / 'website-raw.txt', raw)
@@ -125,7 +129,9 @@ def prepare_review(path, job):
 def apply_report(job, report):
     complete_website(job)
     source, raw = merged(job, 'input'), merged(job, 'output')
-    if report.get('version') != 1 or report.get('source_sha256') != digest(source) or report.get('website_sha256') != digest(raw):
+    if report.get('version') != REVIEW_VERSION:
+        raise ValueError('This review uses an earlier/unsupported policy. Regenerate the review template and review under conservative policy v2; website results are retained.')
+    if report.get('source_sha256') != digest(source) or report.get('website_sha256') != digest(raw):
         raise ValueError('Review belongs to a different source or website result.')
     checks = report.get('checks')
     if not isinstance(checks, dict) or any(checks.get(name) is not True for name in REVIEW_CHECKS):
@@ -133,18 +139,29 @@ def apply_report(job, report):
     if not isinstance(report.get('summary'), str) or not report['summary'].strip():
         raise ValueError('A substantive review summary is required, including for zero edits.')
     edits, unresolved = report.get('edits'), report.get('unresolved')
-    if not isinstance(edits, list) or not isinstance(unresolved, list) or any(not isinstance(x, str) or not x.strip() for x in unresolved):
-        raise ValueError('Edits and unresolved findings must be lists; unresolved findings must be nonempty text.')
+    if not isinstance(edits, list):
+        raise ValueError('Edits must be a list.')
+    for name in ('unresolved', 'source_notes', 'observations'):
+        notes = report.get(name)
+        if not isinstance(notes, list) or any(not isinstance(x, str) or not x.strip() for x in notes):
+            raise ValueError(f'{name} must be a list of nonempty text findings.')
     located = []
     for number, edit in enumerate(edits, 1):
         if not isinstance(edit, dict) or edit.get('category') not in CATEGORIES:
             raise ValueError(f'Edit {number}: invalid category.')
-        for key in ('before', 'after', 'reason', 'evidence'):
+        for key in ('before', 'after', 'reason', 'evidence', 'reader_impact'):
             if not isinstance(edit.get(key), str):
                 raise ValueError(f'Edit {number}: {key} must be text.')
         before, after = edit['before'], edit['after']
-        if not before or before == after or not edit['reason'].strip() or not edit['evidence'].strip():
-            raise ValueError(f'Edit {number}: supply a real change, reason and supporting evidence.')
+        if not before or before == after or any(not edit[k].strip() for k in ('reason', 'evidence', 'reader_impact')):
+            raise ValueError(f'Edit {number}: supply a real change, reason, evidence and concrete reader impact.')
+        for key in ('introduced_by_website', 'certain_error', 'material_impact', 'necessity_rechecked'):
+            if edit.get(key) is not True:
+                raise ValueError(f'Edit {number}: {key} must be explicitly confirmed before automatic repair.')
+        if type(edit.get('structure_changed')) is not bool:
+            raise ValueError(f'Edit {number}: declare whether sentence structure changes.')
+        if edit['structure_changed'] and (not isinstance(edit.get('structure_reason'), str) or not edit['structure_reason'].strip()):
+            raise ValueError(f'Edit {number}: explain why wording-only repair cannot fix the error.')
         if 'start' in edit:
             start = edit['start']
             if type(start) is not int or start < 0 or raw[start:start + len(before)] != before:
@@ -166,20 +183,46 @@ def apply_report(job, report):
     return final
 
 
+def change_summary(job, report):
+    """Show actual changed spans, excluding unchanged text in locating anchors."""
+    raw = merged(job, 'output')
+    spans = []
+    for number, edit in enumerate(report['edits'], 1):
+        start = edit['start'] if 'start' in edit else raw.index(edit['before'])
+        matcher = difflib.SequenceMatcher(None, edit['before'], edit['after'], autojunk=False)
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag != 'equal':
+                spans.append({'edit': number, 'raw_start': start + i1, 'raw_end': start + i2,
+                              'before': edit['before'][i1:i2], 'after': edit['after'][j1:j2]})
+    return {'edit_count': len(report['edits']),
+            'removed_characters': sum(len(x['before']) for x in spans),
+            'added_characters': sum(len(x['after']) for x in spans),
+            'structure_change_count': sum(x['structure_changed'] for x in report['edits']),
+            'changed_spans': spans}
+
+
 def record_review(path, job, report_path):
     report = json.loads(Path(report_path).read_text(encoding='utf-8-sig'))
     final = apply_report(job, report)
+    changes = change_summary(job, report)
     folder = path.parent / 'review'
     folder.mkdir(exist_ok=True)
     save(folder / 'report.json', report)
+    save(folder / 'change-summary.json', changes)
     write_text_exact(folder / 'corrected-draft.txt', final)
-    job['review'] = {'status': 'applied', 'source_sha256': report['source_sha256'],
+    job['review'] = {'status': 'applied', 'report_version': REVIEW_VERSION,
+                     'source_sha256': report['source_sha256'],
                      'website_sha256': report['website_sha256'],
                      'report_sha256': digest(json.dumps(report, ensure_ascii=False, sort_keys=True)),
                      'draft_sha256': digest(final), 'edit_count': len(report['edits']),
+                     'change_summary_sha256': digest(json.dumps(changes, ensure_ascii=False, sort_keys=True)),
+                     'removed_characters': changes['removed_characters'],
+                     'added_characters': changes['added_characters'],
+                     'structure_change_count': changes['structure_change_count'],
                      'unresolved': report['unresolved'], 'final_read_note': None}
     save(path, job)
     print(f'Repairs applied: {len(report["edits"])}. Unresolved: {len(report["unresolved"])}.')
+    print(f'Actual diff: {changes["removed_characters"]} removed / {changes["added_characters"]} added characters; {changes["structure_change_count"]} declared structure changes. Details: review/change-summary.json')
     print('Read corrected-draft.txt in full with its context before review-complete.')
     print('Draft SHA-256: ' + digest(final))
 
@@ -192,12 +235,17 @@ def checked_review(path, job, require_verified=False):
     folder = path.parent / 'review'
     report = json.loads((folder / 'report.json').read_text(encoding='utf-8-sig'))
     final = apply_report(job, report)
-    if (review.get('source_sha256') != report['source_sha256'] or
+    changes = change_summary(job, report)
+    saved_changes = json.loads((folder / 'change-summary.json').read_text(encoding='utf-8-sig'))
+    if (review.get('report_version') != REVIEW_VERSION or
+            review.get('source_sha256') != report['source_sha256'] or
             review.get('website_sha256') != report['website_sha256'] or
             review.get('report_sha256') != digest(json.dumps(report, ensure_ascii=False, sort_keys=True)) or
             review.get('draft_sha256') != digest(final) or
             read_text_exact(folder / 'corrected-draft.txt') != final or
-            review.get('unresolved') != report['unresolved']):
+            review.get('unresolved') != report['unresolved'] or
+            saved_changes != changes or
+            review.get('change_summary_sha256') != digest(json.dumps(changes, ensure_ascii=False, sort_keys=True))):
         raise ValueError('Review or draft changed. Reapply the review and reread the final draft.')
     if require_verified and (review.get('status') != 'verified' or report['unresolved'] or not review.get('final_read_note')):
         raise ValueError('Final reread is not confirmed, or unresolved findings remain.')
