@@ -2,7 +2,7 @@
 
 # humanrizeai
 
-**在 Codex 中自动分批处理长文，全文审查后作最小修正。**
+**在 Codex 中最多十路并发处理长文，全文审查后作最小修正。**
 
 <p>
   <a href="SKILL.md"><img src="https://img.shields.io/badge/Codex-Skill-0F766E?style=flat-square" alt="Codex Skill"></a>
@@ -10,9 +10,10 @@
   <a href="scripts/humanize_batch.py"><img src="https://img.shields.io/badge/Playwright-Web_Automation-2EAD33?style=flat-square" alt="Playwright web automation"></a>
   <a href="references/review-and-repair.md"><img src="https://img.shields.io/badge/Review-Full_Context-8B5CF6?style=flat-square" alt="Full context review"></a>
   <a href="references/review-and-repair.md"><img src="https://img.shields.io/badge/Edits-Minimal-F59E0B?style=flat-square" alt="Minimal edits"></a>
+  <a href="scripts/humanize_batch.py"><img src="https://img.shields.io/badge/Concurrency-Up_to_10-2563EB?style=flat-square" alt="Up to 10 concurrent requests"></a>
 </p>
 
-通过 [humanizeai.pro](https://www.humanizeai.pro/) 网页逐批处理文字，保存进度，合并结果；
+通过 [humanizeai.pro](https://www.humanizeai.pro/) 网页最多十路并发处理文字，保存进度，按原顺序合并结果；
 再由 Codex 对照原文与全文上下文，只修复网站引入、确定且影响含义的错误。
 
 [快速使用](#快速使用) · [安装](#安装) · [工作流程](#工作流程) · [审查协议](references/review-and-repair.md) · [反馈问题](https://github.com/Winston798/humanrizeai/issues)
@@ -25,7 +26,7 @@
 
 安装后，在 Codex 中附上文本文件或粘贴原文，然后说：
 
-> 使用 $humanrizeai，把这篇文字通过 humanizeai.pro 分批处理并审查全文，只修网站引入、确定且影响含义的错误，默认保留句式，逐项复查修改必要性后复读交付。
+> 使用 $humanrizeai，把这篇文字通过 humanizeai.pro 最多10路并发处理，每次不超过200词，保留完整短段落，合并后审查全文，只修网站引入、确定且影响含义的错误，默认保留句式，逐项复查修改必要性后复读交付。
 
 Codex 会运行网页处理、记录进度并完成审查，你不需要逐段复制，也不需要手动填写审查报告。
 
@@ -33,8 +34,9 @@ Codex 会运行网页处理、记录进度并完成审查，你不需要逐段�
 
 | 能力 | 实际行为 |
 | :--- | :--- |
-| **自动分批** | 默认每批最多 180 个保守计数单位，配置上限 200；优先保留段落和句末 |
-| **中断后继续** | 每批保存原文与网站结果，恢复时跳过已完成批次，先检查待确认提交 |
+| **每次上限 200 words** | 默认上限 200；不超过上限的段落完整提交，仅超长段落按句末或词边界拆分 |
+| **最多十路并发** | 同一浏览器会话内使用独立页面，完成一路就补入下一批，按原顺序合并 |
+| **中断后继续** | 每批绑定编号和页面槽位；统一写入进度，恢复先核查待确认请求，避免重复提交 |
 | **全文审查** | 对照原文，检查逻辑因果、事实数字、否定关系、指代、遗漏和跨批次矛盾 |
 | **保守修正** | 只修网站引入、确定且影响含义的错误；默认保留句式，不补非关键遗漏 |
 | **修改可追溯** | 保留原文、网站稿、修正稿、必要性与依据，以及实际改动片段和增删字符数 |
@@ -74,7 +76,7 @@ git clone https://github.com/Winston798/humanrizeai.git ~/.codex/skills/humanriz
 
 **保存原文 → 网页分批处理 → 合并网站稿 → 全文审查 → 最小修正 → 复读确认 → 导出最终版**
 
-1. **处理原文。** 保存文字，按段落和句末切分，通过网页顺序提交，并记录每批结果。
+1. **并发处理。** 默认每次上限 200 words，短段落原样提交；最多同时运行十路请求，哪个完成就补入下一批。结果可乱序返回，但按原批次编号保存与合并。
 2. **审查全文。** Codex 同时阅读原文和网站合并稿，结合前后文识别明显的逻辑、事实及语义问题。
 3. **必要性复查与局部修复。** 每处修改先回答“不改会让读者具体误解什么”；答不出就撤销。优先改词或局部短语，句式调整必须说明为什么局部措辞修正无法解决。
 4. **复读交付。** 只核查确认的错误是否解决、修正是否引入新问题，不再优化表述，之后导出新的 UTF-8 文本文件。无问题时允许零修改。
@@ -91,6 +93,18 @@ git clone https://github.com/Winston798/humanrizeai.git ~/.codex/skills/humanriz
 | 尚不能判定的网站新增实质问题 | 保留疑点，解决前不导出最终版 |
 
 补回遗漏仅限事实失真、逻辑断裂、关键条件消失或后文无法理解的情况。默认保留句子结构，不为流畅、正式或文风统一改写。没有固定修改百分比；实际增删统计用于核对范围，不代表 AI 检测分数。
+
+### 并发与恢复
+
+- `run` 默认最多十路；可用 `--workers 1`～`10` 调整，不要求每次必须有十段。
+- 200 words 是单次提交上限，不是要求把短段落凑满或再次拆小。中日韩文字仍按字符保守计数。
+- 所有页面共享同一浏览器会话；一个调度进程统一保存结果，`run.lock` 防止并发写入同一任务。
+- 首轮填充后同时提交，空位随完成随补入；不会为每个段落无限创建窗口。
+- 发现验证码、额度、登录/付费或其他异常时停止补入新请求，尽量保存其余已提交结果，保留未确认状态供恢复。
+- 恢复时先核对 `inflight` 中的批次、页面和输入。页面丢失或内容不符时先检查，不自动重新提交状态不明的请求。
+- 运行中不要用另一个进程手动修改任务；若异常退出遗留 `run.lock`，先确认运行进程已结束，再移除该任务的锁文件。
+
+十路并发已用十段各 200 words 的示例验证。具体速度取决于网站和本机环境，不代表无限并发或保证固定倍数的提速。
 
 ## 文件结构
 
@@ -116,7 +130,7 @@ humanrizeai/
 
 | 命令 | 用途 |
 | :--- | :--- |
-| `prepare` / `run` / `status` | 创建任务、运行网页处理、查看完整流程状态 |
+| `prepare` / `run` / `status` | 创建任务、最多十路并发处理、查看完整流程和各路待确认状态 |
 | `accept` / `retry` | 浏览器工具接手后登记结果，或检查后恢复提交 |
 | `review-prepare` | 生成原文、网站稿和审查报告模板 |
 | `review-apply` | 校验修正记录，生成独立修正稿 |

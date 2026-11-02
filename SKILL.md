@@ -1,6 +1,6 @@
 ---
 name: humanrizeai
-description: "通过 humanizeai.pro 将长文分批降 AI（每批不超过 200 words），全文审查后仅修复网站引入、确定且影响含义的错误，默认保留句式，再复读交付。用于用户指定此网站的批量改写请求。"
+description: "通过 humanizeai.pro 最多 10 路并发处理长文，每次不超过 200 words，按原顺序合并；全文审查后仅修复网站引入、确定且影响含义的错误，默认保留句式，再复读交付。"
 ---
 
 # humanrizeai
@@ -21,9 +21,10 @@ Resolve `scripts/humanize_batch.py` relative to this skill. It requires Python 3
    python "<skill>/scripts/humanize_batch.py" run --job "<work/job>"
    ```
 
-   The default is 180 conservative word units, with each CJK character counted separately. The hard configurable maximum is 200. Splits prefer paragraphs and sentence endings; an overlong sentence is split at a word boundary. Do not add overlap or context to submissions. Use the site's free default settings unless the user requests another available setting; the helper leaves browser settings unchanged.
-3. Run with a yielding shell tool and poll its session. It prints progress for every saved batch. Do not run two workers on one job. The job has an isolated visible browser session; leave it available if the user must complete a challenge.
-4. `run` resumes the same job, skips saved results, and checks a pending submission before doing anything new. It never automatically resubmits an ambiguous timeout. Requests are sequential, with a three-second gap. Do not rotate identities, bypass access controls, or increase parallelism to overcome site limits.
+   每次提交上限默认 **200 words**（可降低，不可超过 200）。已有不超过上限的段落完整提交，不为了并发再拆小，也不强求每段凑满 200。只有段落本身超过上限时才按句末/词边界切分；不加重复上下文。中日韩文字仍按字符保守计数。使用网站免费默认设置，除非用户指定其他可用设置。
+3. `run` 默认最多 **10 路并发**（`--workers 1`～`10`），使用同一浏览器会话的独立标签页，不创建多个身份。首轮填入各批次后同时提交；完成并保存一路就补入下一批，不等整轮结束。结果可以乱序返回，但必须按原批次编号保存，合并严格按原文顺序。
+4. 用可返回运行会话的执行工具启动并读进度。每个任务仅启动一个调度进程，由它统一写 `job.json`；`run.lock` 防止两个运行实例和手动操作同时写进度。不要同时手工调用 `accept`/`retry` 等修改同一任务。异常退出遗留锁时先检查进程是否结束，再移除该任务的锁文件。
+5. `inflight` 为每个未确认批次记录页面槽位、原输出和提交状态。恢复先检查这些页面和结果，不重新提交已完成或状态不明的请求；页面丢失或内容不对应时停下来核实。旧版单请求 `pending` 可在运行时转为槽位 0。发现验证码、额度或其他异常即停止补入新请求，尽量收集其余已提交结果后保留进度退出。不通过并发或身份切换绕过限制。
 
 ## Interruptions and UI changes
 
@@ -32,7 +33,7 @@ The verified UI labels are `Input Textarea` (input), `Humanize AI` (submit), and
 The helper stops and preserves progress for a visible CAPTCHA, quota/login/payment prompt, timeout, or unexpected UI. Ask for only the action actually needed. A static reCAPTCHA footer is not a challenge. Do not claim completion or silently replace a failed chunk with its original.
 
 - After the user resolves a challenge, run the same command again to recover any completed output.
-- If a pending request demonstrably never completed, inspect the current UI before using `retry --job "<job>" --index N`. This clears only that pending submission; then rerun. At most two submissions per chunk are allowed. A quota/login/payment interruption requires resolution, not a blind retry.
+- If a pending request demonstrably never completed, inspect the current UI after the runner exits before using `retry --job "<job>" --index N`. This clears only that batch's legacy pending/inflight record, retaining the other requests; then rerun. At most two submissions per chunk are allowed. A quota/login/payment interruption requires resolution, not a blind retry.
 - For browser-tool fallback, inspect `status`, use `job.json` for the exact next chunk, fill and submit through the available browser tool, wait for completion, and save **only verified website output** as UTF-8. Record it using `accept --job "<job>" --index N --text-file "<result.txt>"`. Do not copy display diffs, old output, or marketing text. The helper rejects empty or conflicting results.
 
 ## 必经的全文审查与最小修正

@@ -22,7 +22,7 @@ def digest(text):
     return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
 
-def split_text(text, limit=180):
+def split_text(text, limit=200):
     """Return a prefix and chunks whose exact source reconstruction equals text."""
     if not 1 <= limit <= 200:
         raise ValueError('Batch limit must be between 1 and 200.')
@@ -76,6 +76,7 @@ def load(job_dir):
            (c['output'] is not None and not c['output'].strip())
            for i, c in enumerate(job['chunks'], 1)):
         raise ValueError('Invalid job chunk data.')
+    job.setdefault('inflight', {})
     job.setdefault('review', None)  # Existing jobs keep website results but need review.
     return path, job
 
@@ -91,6 +92,8 @@ CATEGORIES = {'logic', 'fact', 'context', 'omission', 'reference', 'terminology'
 def complete_website(job):
     if any(c['output'] is None for c in job['chunks']):
         raise ValueError('Website processing is incomplete.')
+    if job.get('pending') is not None or job.get('inflight'):
+        raise ValueError('Pending website requests remain; review/export must wait for resolution.')
 
 
 def merged(job, field):
@@ -316,74 +319,186 @@ def accept(path, job, index, text):
         raise ValueError('Invalid index or empty output.')
     if c['output'] is not None and c['output'] != text.strip():
         raise ValueError('A different output is already saved; refusing overwrite.')
-    if any(x['output'] is None for x in job['chunks'][:index - 1]):
-        raise ValueError('Record results in source order.')
     if job['pending'] is not None and job['pending']['index'] != index:
         raise ValueError('A different batch is pending; refusing to clear it.')
     if c['output'] is None:
         job['review'] = None
     c['output'] = text.strip()
+    job.setdefault('inflight', {}).pop(str(index), None)
     job['pending'] = None
     job['last_error'] = None
     save(path, job)
     print(f'Saved batch {index}/{len(job["chunks"])}.', flush=True)
 
 
-def run(path, job, timeout):
-    if all(c['output'] is not None for c in job['chunks']):
-        print('Website batches are already saved. Contextual review and final reread are required before final export.')
-        return
-    try:
-        cli(job, path.parent, 'snapshot')
-    except RuntimeError:
-        cli(job, path.parent, 'open', 'https://www.humanizeai.pro/', '--headed')
-    for c in job['chunks']:
-        if c['output'] is not None:
-            continue
-        if job['pending'] is None:
-            if c['attempts'] >= 2:
-                raise RuntimeError('Two-submission limit reached for batch ' + str(c['index']))
-            payload = base64.b64encode(c['input'].encode('utf-8')).decode('ascii')
-            old = code(job, path.parent, READ + """
+class BrowserPool:
+    """One browser context, isolated page per slot; all writes stay in Python."""
+    def __init__(self, path, job):
+        self.path, self.job = path, job
+
+    def open(self, slots, recovering):
+        try:
+            cli(self.job, self.path.parent, 'snapshot')
+        except RuntimeError:
+            if recovering:
+                raise RuntimeError('Pending pages are unavailable. Inspect the browser and pending records; no request was resubmitted.')
+            cli(self.job, self.path.parent, 'open', 'https://www.humanizeai.pro/', '--headed')
+        code(self.job, self.path.parent, """
+const context = page.context();
+const needed = """ + str(slots) + """ - context.pages().length;
+await Promise.all(Array.from({length:Math.max(0, needed)}, async () => {
+  const p = await context.newPage();
+  await p.goto('https://www.humanizeai.pro/', {waitUntil:'domcontentloaded', timeout:25000});
+}));
+return {pages:context.pages().length};
+""")
+
+    def fill(self, slot, text):
+        payload = base64.b64encode(text.encode('utf-8')).decode('ascii')
+        return code(self.job, self.path.parent, """
+const p = page.context().pages()[""" + str(slot) + """];
+if (!p || p.url() !== 'https://www.humanizeai.pro/') throw new Error('Unexpected pool page.');
 for (const name of ['Decline', 'Skip']) {
-  const b = page.getByRole('button', {name, exact:true});
+  const b = p.getByRole('button', {name, exact:true});
   if (await b.count() === 1 && await b.isVisible()) await b.click();
 }
 const text = Buffer.from('""" + payload + """', 'base64').toString('utf8');
+const input = p.getByRole('textbox', {name:'Input Textarea', exact:true});
 await input.fill(text);
 if (await input.inputValue() !== text) throw new Error('Input was truncated or changed.');
-return {before:await output.inputValue()};
+return {before:await p.getByRole('textbox', {name:'Humanized output', exact:true}).inputValue()};
 """)
-            job['pending'] = {'index': c['index'], 'before': old['before']}
-            c['attempts'] += 1
-            save(path, job)  # Persist before clicking; a crash must not resubmit.
-            code(job, path.parent, READ + "await button.click({timeout:10000}); return {submitted:true};")
-            print(f'Submitted batch {c["index"]}/{len(job["chunks"])}.', flush=True)
-        pending = job['pending']
-        if pending['index'] != c['index']:
-            raise RuntimeError('Pending batch does not match next unfinished batch.')
-        deadline = time.monotonic() + timeout
-        stable = None
-        while time.monotonic() < deadline:
-            state = code(job, path.parent, POLL)
-            if state['input'] != c['input']:
-                raise RuntimeError('Browser input differs from pending batch. Inspect the browser before resuming.')
-            warning = state['alerts']
-            if state['challenge'] or re.search(r'captcha|quota|limit|log.?in|sign.?in|upgrade|payment|too many|try again|error|failed', warning, re.I):
-                raise RuntimeError('Website requires attention: ' + (warning or 'Visible CAPTCHA. Complete it in the browser, then resume.'))
-            value = state['output'].strip()
-            if state['ready'] and value and value != pending['before'].strip():
-                if stable == value:
-                    accept(path, job, c['index'], value)
-                    break
-                stable = value
-            else:
-                stable = None
-            time.sleep(2)
+
+    def submit(self, slots):
+        return code(self.job, self.path.parent, """
+const slots = """ + str(slots) + """;
+return await Promise.all(slots.map(async slot => {
+  try {
+    await page.context().pages()[slot].getByRole('button', {name:'Humanize AI', exact:true}).click({timeout:10000});
+    return {slot, ok:true};
+  } catch(e) { return {slot, ok:false, error:String(e)}; }
+}));
+""")
+
+    def read(self, slots):
+        return code(self.job, self.path.parent, """
+async function inspect(page) { """ + POLL + """ }
+const slots = """ + str(slots) + """;
+return await Promise.all(slots.map(async slot => {
+  try { return {slot, ...await inspect(page.context().pages()[slot])}; }
+  catch(e) { return {slot, error:String(e)}; }
+}));
+""")
+
+
+def website_problem(state):
+    if state.get('error'):
+        return state['error']
+    warning = state.get('alerts', '')
+    if state.get('challenge') or re.search(r'captcha|quota|limit|log.?in|sign.?in|upgrade|payment|too many|try again|error|failed', warning, re.I):
+        return warning or 'Visible CAPTCHA. Complete it in the browser before resuming.'
+    return None
+
+
+def run(path, job, timeout, workers=10):
+    if not 1 <= workers <= 10:
+        raise ValueError('Workers must be between 1 and 10.')
+    active = job.setdefault('inflight', {})
+    if job['pending'] is not None:
+        old = job['pending']
+        if active:
+            raise ValueError('Legacy and parallel pending records conflict; inspect before resuming.')
+        active[str(old['index'])] = dict(old, slot=0)
+        job['pending'] = None
+        save(path, job)
+    if all(c['output'] is not None for c in job['chunks']):
+        if active:
+            raise ValueError('Completed job has conflicting pending records.')
+        print('Website results saved. Contextual review and final reread are required before export.')
+        return
+    for key, item in active.items():
+        if key != str(item['index']) or not 1 <= item['index'] <= len(job['chunks']) or job['chunks'][item['index'] - 1]['output'] is not None:
+            raise ValueError('Invalid pending batch mapping.')
+    used = [item['slot'] for item in active.values()]
+    if len(set(used)) != len(used) or any(type(s) is not int or s < 0 or s >= 10 for s in used):
+        raise ValueError('Invalid or duplicate pending page slot.')
+    count = min(workers, sum(c['output'] is None for c in job['chunks']))
+    count = max(count, max(used, default=-1) + 1)
+    pool = BrowserPool(path, job)
+    pool.open(count, bool(active))
+    started = {key: time.monotonic() for key in active}
+    stable, failures = {}, {}
+    job['workers'] = workers
+    save(path, job)
+    while True:
+        if active:
+            states = {s['slot']: s for s in pool.read([a['slot'] for a in active.values()])}
+            for key, item in list(active.items()):
+                if key in failures:
+                    continue
+                state = states[item['slot']]
+                c = job['chunks'][item['index'] - 1]
+                problem = website_problem(state)
+                if not problem and state['input'] != c['input']:
+                    problem = 'Input differs from the mapped batch; inspect the page before resuming.'
+                if problem:
+                    failures[key] = problem
+                    item['error'] = problem
+                    save(path, job)
+                    continue
+                value = state['output'].strip()
+                if state['ready'] and value and value != item['before'].strip():
+                    if stable.get(key) == value:
+                        accept(path, job, c['index'], value)
+                        started.pop(key, None)
+                        continue
+                    stable[key] = value
+                else:
+                    stable.pop(key, None)
+                if time.monotonic() - started[key] > timeout:
+                    failures[key] = 'Timed out waiting for fresh stable output; pending request retained.'
+                    item['error'] = failures[key]
+                    save(path, job)
+        # Stop replenishing on the first observed interruption, but save the
+        # other requests already in flight before returning control to Codex.
+        if failures:
+            if all(key in failures for key in active):
+                raise RuntimeError('Website processing needs attention: ' + json.dumps(failures, ensure_ascii=False))
         else:
-            raise RuntimeError('Timed out waiting for fresh completed output. Pending batch retained; inspect the visible browser before retrying.')
-        time.sleep(3)
-    print('Website batches saved. Next: review-prepare, contextual review, minimal repairs, final reread, then export.', flush=True)
+            free = [s for s in range(count) if s not in {a['slot'] for a in active.values()}]
+            available = [c for c in job['chunks'] if c['output'] is None and str(c['index']) not in active]
+            assignments = list(zip(free[:max(0, workers - len(active))], available))
+            newly_prepared = []
+            for slot, c in assignments:
+                if c['attempts'] >= 2:
+                    failures[str(c['index'])] = 'Two-submission limit reached.'
+                    break
+                old = pool.fill(slot, c['input'])
+                key = str(c['index'])
+                active[key] = {'index':c['index'], 'slot':slot, 'before':old['before'], 'phase':'prepared'}
+                c['attempts'] += 1
+                started[key] = time.monotonic()
+                newly_prepared.append(slot)
+                save(path, job)  # Before any click: an ambiguous crash never resubmits.
+            if newly_prepared:
+                # All prepared pages are clicked together, rather than waiting
+                # for one request to complete before submitting the next.
+                outcome = pool.submit(newly_prepared)
+                for result in outcome:
+                    key = next(k for k,a in active.items() if a['slot'] == result['slot'])
+                    active[key]['phase'] = 'submitted' if result['ok'] else 'uncertain'
+                    started[key] = time.monotonic()
+                    if not result['ok']:
+                        failures[key] = result['error']
+                        active[key]['error'] = result['error']
+                save(path, job)
+                print(f'Active requests: {len(active)}/{workers}; saved: {sum(c["output"] is not None for c in job["chunks"])}/{len(job["chunks"])}.', flush=True)
+        if failures and not active:
+            raise RuntimeError('Website processing needs attention: ' + json.dumps(failures, ensure_ascii=False))
+        if not active and all(c['output'] is not None for c in job['chunks']):
+            break
+        time.sleep(2)
+    print('Website batches saved in source order. Next: full contextual review, conservative minimal repairs, final reread and export.', flush=True)
 
 
 def main():
@@ -392,12 +507,13 @@ def main():
     p = commands.add_parser('prepare')
     p.add_argument('--input', required=True)
     p.add_argument('--job', required=True)
-    p.add_argument('--limit', type=int, default=180)
+    p.add_argument('--limit', type=int, default=200)
     for name in ('run', 'status', 'export', 'accept', 'retry', 'review-prepare', 'review-apply', 'review-complete'):
         p = commands.add_parser(name)
         p.add_argument('--job', required=True)
         if name == 'run':
             p.add_argument('--timeout', type=int, default=120)
+            p.add_argument('--workers', type=int, default=10)
         if name == 'export':
             p.add_argument('--output', required=True)
         if name in ('accept', 'retry'):
@@ -426,15 +542,26 @@ def main():
         print(f'Prepared {len(chunks)} batches, at most {args.limit} units each. Job: {path}')
         return
     path, job = load(args.job)
+    if args.command not in ('run', 'status') and (path.parent / 'run.lock').exists():
+        raise ValueError('A runner owns this job. Wait for it to exit before changing task records.')
     if args.command == 'run':
         if args.timeout < 1:
             raise ValueError('Timeout must be positive.')
+        lock = path.parent / 'run.lock'
         try:
-            run(path, job, args.timeout)
+            with lock.open('x', encoding='utf-8') as stream:
+                stream.write(str(os.getpid()))
+        except FileExistsError:
+            raise ValueError('Job is already locked. Inspect its runner before removing a stale run.lock.')
+        try:
+            path, job = load(args.job)
+            run(path, job, args.timeout, args.workers)
         except (Exception, KeyboardInterrupt) as error:
             job['last_error'] = str(error) or 'Interrupted.'
             save(path, job)
             raise RuntimeError(job['last_error']) from error
+        finally:
+            lock.unlink(missing_ok=True)
     elif args.command == 'status':
         phase = 'website_processing'
         if all(c['output'] is not None for c in job['chunks']):
@@ -453,6 +580,7 @@ def main():
                     phase = 'review_invalid'
         print(json.dumps({'completed': sum(c['output'] is not None for c in job['chunks']),
                           'total': len(job['chunks']), 'pending': job['pending'],
+                          'inflight': job['inflight'], 'workers': job.get('workers', 10),
                           'phase': phase, 'workflow_complete': phase == 'complete', 'review': job['review'],
                           'last_error': job['last_error'], 'session': job['session']}, ensure_ascii=False, indent=2))
     elif args.command == 'review-prepare':
@@ -464,11 +592,14 @@ def main():
     elif args.command == 'accept':
         accept(path, job, args.index, Path(args.text_file).read_text(encoding='utf-8-sig'))
     elif args.command == 'retry':
-        if job['pending'] is None or job['pending']['index'] != args.index:
+        legacy = job['pending'] is not None and job['pending']['index'] == args.index
+        if not legacy and str(args.index) not in job['inflight']:
             raise ValueError('No matching pending batch.')
         if job['chunks'][args.index - 1]['attempts'] >= 2:
             raise ValueError('Two-submission limit reached.')
-        job['pending'] = None
+        if legacy:
+            job['pending'] = None
+        job['inflight'].pop(str(args.index), None)
         save(path, job)
         print('Pending flag cleared. Rerun only after inspecting the website.')
     elif args.command == 'export':

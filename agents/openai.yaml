@@ -1,4 +1,4 @@
 interface:
   display_name: "humanrizeai"
-  short_description: "通过 HumanizeAI 分批处理长文，只修确定且影响含义的新增错误，默认保留句式"
-  default_prompt: "使用 $humanrizeai 分批处理以下文本并审查全文，只修复网站引入、确定且影响含义的错误，默认保留句式，逐项复查修改必要性后复读交付。"
+  short_description: "最多十路并发、每次上限200词，顺序合并后全文审查，只作必要最小修正"
+  default_prompt: "使用 $humanrizeai 最多10路并发处理以下文本，每次不超过200词并保留完整短段落，按原顺序合并，保守审查、最小修正并复读交付。"

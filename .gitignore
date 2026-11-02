@@ -13,3 +13,4 @@ Thumbs.db
 .env.*
 job.json
 authored-report.json
+run.lock
