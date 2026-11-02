@@ -1,4 +1,4 @@
 interface:
   display_name: "humanrizeai"
-  short_description: "最多十路并发、每次上限200词，顺序合并后全文审查，只作必要最小修正"
-  default_prompt: "使用 $humanrizeai 最多10路并发处理以下文本，每次不超过200词并保留完整短段落，按原顺序合并，保守审查、最小修正并复读交付。"
+  short_description: "自动降 AI 的 Codex skill，支持长文十路并发降 AI、自动合并和保守查错"
+  default_prompt: "使用 $humanrizeai 帮我把以下文章自动降 AI，自动分批并发提交、合并全文，保守查错并作必要最小修正后交付。"

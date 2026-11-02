@@ -1,6 +1,6 @@
 ---
 name: humanrizeai
-description: "通过 humanizeai.pro 最多 10 路并发处理长文，每次不超过 200 words，按原顺序合并；全文审查后仅修复网站引入、确定且影响含义的错误，默认保留句式，再复读交付。"
+description: "自动降 AI 的 Codex skill：通过 humanizeai.pro 最多 10 路并发降 AI，每次不超过 200 words，自动合并长文；交付前保守查错，仅最小修复网站引入的实质错误，默认保留句式。"
 ---
 
 # humanrizeai

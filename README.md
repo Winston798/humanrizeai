@@ -2,10 +2,10 @@
 
 # humanrizeai
 
-**在 Codex 中最多十路并发处理长文，全文审查后作最小修正。**
+**一个自动降 AI 的 Codex Skill。**
 
 <p>
-  <a href="SKILL.md"><img src="https://img.shields.io/badge/Codex-Skill-0F766E?style=flat-square" alt="Codex Skill"></a>
+  <a href="SKILL.md"><img src="https://img.shields.io/badge/Codex-Auto_Humanizer-0F766E?style=flat-square" alt="Codex automatic AI humanizer skill"></a>
   <a href="#安装"><img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white" alt="Python 3.10 or newer"></a>
   <a href="scripts/humanize_batch.py"><img src="https://img.shields.io/badge/Playwright-Web_Automation-2EAD33?style=flat-square" alt="Playwright web automation"></a>
   <a href="references/review-and-repair.md"><img src="https://img.shields.io/badge/Review-Full_Context-8B5CF6?style=flat-square" alt="Full context review"></a>
@@ -13,8 +13,8 @@
   <a href="scripts/humanize_batch.py"><img src="https://img.shields.io/badge/Concurrency-Up_to_10-2563EB?style=flat-square" alt="Up to 10 concurrent requests"></a>
 </p>
 
-通过 [humanizeai.pro](https://www.humanizeai.pro/) 网页最多十路并发处理文字，保存进度，按原顺序合并结果；
-再由 Codex 对照原文与全文上下文，只修复网站引入、确定且影响含义的错误。
+把文章交给 Codex，自动通过 [humanizeai.pro](https://www.humanizeai.pro/) 完成降 AI，省去逐段提交和复制结果。
+支持长文自动分批、最多十路并发降 AI，完成后合并全文，并保守修复降 AI 过程中引入的明显错误。
 
 [快速使用](#快速使用) · [安装](#安装) · [工作流程](#工作流程) · [审查协议](references/review-and-repair.md) · [反馈问题](https://github.com/Winston798/humanrizeai/issues)
 
@@ -26,19 +26,20 @@
 
 安装后，在 Codex 中附上文本文件或粘贴原文，然后说：
 
-> 使用 $humanrizeai，把这篇文字通过 humanizeai.pro 最多10路并发处理，每次不超过200词，保留完整短段落，合并后审查全文，只修网站引入、确定且影响含义的错误，默认保留句式，逐项复查修改必要性后复读交付。
+> 使用 $humanrizeai，帮我把这篇文章自动降 AI，完成后交付完整版本。
 
-Codex 会运行网页处理、记录进度并完成审查，你不需要逐段复制，也不需要手动填写审查报告。
+Codex 会自动分批提交网站降 AI、收集结果、按原顺序合并，并完成降 AI 后的查错与必要修正。你不需要逐段复制、等待和粘贴，也不需要手动填写审查报告。
 
-## 能做什么
+## 自动降 AI 能力
 
 | 能力 | 实际行为 |
 | :--- | :--- |
-| **每次上限 200 words** | 默认上限 200；不超过上限的段落完整提交，仅超长段落按句末或词边界拆分 |
-| **最多十路并发** | 同一浏览器会话内使用独立页面，完成一路就补入下一批，按原顺序合并 |
+| **自动降 AI** | 自动调用 humanizeai.pro 网页，将长文降 AI 的重复操作交给 Codex 完成 |
+| **长文自动分批** | 默认上限 200；不超过上限的段落完整提交，仅超长段落按句末或词边界拆分 |
+| **最多十路并发降 AI** | 同时提交多个段落，完成一路就补入下一批；结果仍按原文顺序合并 |
 | **中断后继续** | 每批绑定编号和页面槽位；统一写入进度，恢复先核查待确认请求，避免重复提交 |
-| **全文审查** | 对照原文，检查逻辑因果、事实数字、否定关系、指代、遗漏和跨批次矛盾 |
-| **保守修正** | 只修网站引入、确定且影响含义的错误；默认保留句式，不补非关键遗漏 |
+| **降 AI 后查错** | 对照原文与全文上下文，检查网站降 AI 引入的逻辑、事实、指代和遗漏问题 |
+| **保留降 AI 后的表达** | 只修网站引入、确定且影响含义的错误；默认保留句式，不补非关键遗漏 |
 | **修改可追溯** | 保留原文、网站稿、修正稿、必要性与依据，以及实际改动片段和增删字符数 |
 | **完整交付检查** | 未登记审查、未确认复读或仍有未解决问题时，程序拒绝导出最终版 |
 
@@ -74,14 +75,14 @@ git clone https://github.com/Winston798/humanrizeai.git ~/.codex/skills/humanriz
 
 ## 工作流程
 
-**保存原文 → 网页分批处理 → 合并网站稿 → 全文审查 → 最小修正 → 复读确认 → 导出最终版**
+**原文 → 自动分批降 AI → 合并降 AI 结果 → 全文查错 → 必要的最小修正 → 复读 → 交付全文**
 
-1. **并发处理。** 默认每次上限 200 words，短段落原样提交；最多同时运行十路请求，哪个完成就补入下一批。结果可乱序返回，但按原批次编号保存与合并。
-2. **审查全文。** Codex 同时阅读原文和网站合并稿，结合前后文识别明显的逻辑、事实及语义问题。
+1. **自动降 AI。** 将原文按网站每次 200 words 的上限准备好，最多十路并发提交；短段落保持完整，完成一路就补入下一批，最终按原顺序合并降 AI 结果。
+2. **检查降 AI 引入的错误。** Codex 对照原文和降 AI 后的全文，检查含义是否被改错、关键条件是否丢失或前后是否出现矛盾。
 3. **必要性复查与局部修复。** 每处修改先回答“不改会让读者具体误解什么”；答不出就撤销。优先改词或局部短语，句式调整必须说明为什么局部措辞修正无法解决。
 4. **复读交付。** 只核查确认的错误是否解决、修正是否引入新问题，不再优化表述，之后导出新的 UTF-8 文本文件。无问题时允许零修改。
 
-网站处理完成只是中间阶段。语义审查由 **Codex** 执行，程序负责精确应用修改、检查记录和稿件是否一致，并执行最终导出条件。
+核心定位是自动降 AI；查错与最小修正用于保护降 AI 后的内容准确性。网站负责生成降 AI 文本，**Codex** 负责交付前的语义审查，程序负责调度、进度与最终导出检查。
 
 ### 修正尺度
 
@@ -116,14 +117,14 @@ humanrizeai/
 ├── references/
 │   └── review-and-repair.md         # 全文审查与最小修正协议
 └── scripts/
-    └── humanize_batch.py            # 分批、网页操作、进度与交付检查
+    └── humanize_batch.py            # 自动降 AI 调度、进度与交付检查
 ```
 
 | 文档 | 内容 |
 | :--- | :--- |
 | [技能说明](SKILL.md) | 如何开始任务、处理中断、执行审查和交付 |
 | [审查与修正协议](references/review-and-repair.md) | 审查范围、最小修改边界及修改记录格式 |
-| [自动化脚本](scripts/humanize_batch.py) | 网页批处理、任务恢复、审查登记和最终导出 |
+| [自动化脚本](scripts/humanize_batch.py) | 自动降 AI 的网页调度、任务恢复、审查登记和最终导出 |
 
 <details>
 <summary><strong>查看脚本命令</strong></summary>
